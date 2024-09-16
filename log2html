@@ -7,7 +7,9 @@ if [ -z "$1" ]; then
 fi
 
 LOGFILE="$1"
-OUTPUT_HTML="output/network_report.html"
+OUTPUT_DIR="output"
+NODE_HTML="$OUTPUT_DIR/node_report.html"
+COMBINED_HTML="$OUTPUT_DIR/combined_report.html"
 
 # Temporary file to store parsed data
 TEMP_DATA="parsed_events.jsonl"
@@ -24,6 +26,17 @@ declare -A EVENT_PATTERNS=(
   ["submits_block_commit"]="Relayer: Submitted block-commit"
 )
 
+declare -A EVENT_EMOJIS=(
+  ["processes_burn_block"]="🔥"
+  ["advances_stacks_tip"]="⬆️"
+  ["proposes_new_block"]="📦"
+  ["receives_signature"]="✍️"
+  ["broadcasts_signed_block"]="📡"
+  ["gives_up_waiting"]="⌛️"
+  ["submits_block_commit"]="🔒"
+  ["receives_rejection"]="❌"
+)
+
 # Build jq filter dynamically
 JQ_FILTER='select('
 for EVENT_TYPE in "${!EVENT_PATTERNS[@]}"; do
@@ -34,22 +47,37 @@ done
 JQ_FILTER=${JQ_FILTER% or }')'
 
 # Extract events and add an event_type field
-jq -c ".[] | $JQ_FILTER | . as \$base | 
-  .fields |= (. + { 
+jq -c '.[] | '"$JQ_FILTER"' | . as $base |
+  .fields |= (. + {
     event_type: (
-      if .message | test(\"${EVENT_PATTERNS[processes_burn_block]}\") then \"processes_burn_block\" 
-      elif .message | test(\"${EVENT_PATTERNS[advances_stacks_tip]}\") then \"advances_stacks_tip\"
-      elif .message | test(\"${EVENT_PATTERNS[proposes_new_block]}\") then \"proposes_new_block\"
-      elif .message | test(\"${EVENT_PATTERNS[receives_signature]}\") then \"receives_signature\"
-      elif .message | test(\"${EVENT_PATTERNS[broadcasts_signed_block]}\") then \"broadcasts_signed_block\"
-      elif .message | test(\"${EVENT_PATTERNS[gives_up_waiting]}\") then \"gives_up_waiting\"
-      elif .message | test(\"${EVENT_PATTERNS[submits_block_commit]}\") then \"submits_block_commit\"
-      else \"unknown\" end
+      if .message | test("'"${EVENT_PATTERNS[processes_burn_block]}"'") then "processes_burn_block"
+      elif .message | test("'"${EVENT_PATTERNS[advances_stacks_tip]}"'") then "advances_stacks_tip"
+      elif .message | test("'"${EVENT_PATTERNS[proposes_new_block]}"'") then "proposes_new_block"
+      elif .message | test("'"${EVENT_PATTERNS[receives_signature]}"'") then "receives_signature"
+      elif .message | test("'"${EVENT_PATTERNS[receives_rejection]}"'") then "receives_rejection"
+      elif .message | test("'"${EVENT_PATTERNS[broadcasts_signed_block]}"'") then "broadcasts_signed_block"
+      elif .message | test("'"${EVENT_PATTERNS[gives_up_waiting]}"'") then "gives_up_waiting"
+      elif .message | test("'"${EVENT_PATTERNS[submits_block_commit]}"'") then "submits_block_commit"
+      else "unknown" end
+    ),
+    burn_block_height: (
+      if .message | test("'"${EVENT_PATTERNS[processes_burn_block]}"'") then
+        (.message | match("SORTITION\\((\\d+)\\)"; "g") | .captures[0].string)
+      else null end
+    ),
+    stacks_block_height: (
+      if .message | test("'"${EVENT_PATTERNS[proposes_new_block]}"'") then
+        (.message | match("Miner: Assembled block #(\\d+)"; "g") | .captures[0].string)
+      elif .message | test("'"${EVENT_PATTERNS[broadcasts_signed_block]}"'") then
+        (.block_height | tostring)
+      elif .message | test("'"${EVENT_PATTERNS[submits_block_commit]}"'") then
+        (.tip_height | tostring)
+      else null end
     )
-  })" "$LOGFILE" > "$TEMP_DATA"
+  })' "$LOGFILE" > "$TEMP_DATA"
 
 # Generate HTML Report
-echo "<html><head><title>Network Report</title>" > "$OUTPUT_HTML"
+echo "<html><head><title>Network Report</title>" > "$NODE_HTML"
 echo "<style>
 body { font-family: Arial, sans-serif; }
 table { border-collapse: collapse; width: 100%; }
@@ -62,13 +90,21 @@ th { background-color: #f2f2f2; }
 .event-broadcasts_signed_block { background-color: #fff0f6; }
 .event-gives_up_waiting { background-color: #fff1f0; }
 .event-submits_block_commit { background-color: #f0f5ff; }
-</style>" >> "$OUTPUT_HTML"
-echo "</head><body>" >> "$OUTPUT_HTML"
-echo "<h1>Network Report</h1>" >> "$OUTPUT_HTML"
+</style>" >> "$NODE_HTML"
+echo "</head><body>" >> "$NODE_HTML"
+echo "<h1>Network Report</h1>" >> "$NODE_HTML"
 
 # Organize events per node
 # Create an associative array to store events per node
 declare -A NODE_EVENTS
+
+ALL_EVENTS=()
+
+# Initialize an array to store event data for Vis.js
+VIS_EVENTS=()
+
+# Event ID counter
+EVENT_ID=1
 
 while IFS= read -r line
 do
@@ -76,24 +112,113 @@ do
   TIMESTAMP=$(echo "$line" | jq -r '.timestamp')
   EVENT_TYPE=$(echo "$line" | jq -r '.fields.event_type')
   MESSAGE=$(echo "$line" | jq -r '.fields.message')
+  BURN_BLOCK_HEIGHT=$(echo "$line" | jq -r '.fields.burn_block_height // empty')
+  STACKS_BLOCK_HEIGHT=$(echo "$line" | jq -r '.fields.stacks_block_height // empty')
   
   # Convert timestamp to a sortable format (e.g., epoch seconds)
   TIMESTAMP_SORTABLE=$(echo "$TIMESTAMP" | tr -cd '[:digit:]')
   TIMESTAMP_SECONDS=$(awk "BEGIN {printf \"%.3f\", $TIMESTAMP / 1000000000}")
   TIMESTAMP_DISPLAY=$(date -u -r "${TIMESTAMP_SECONDS%.*}" +"%Y-%m-%dT%H:%M:%SZ")
   
+  # Initialize content variable
+  CONTENT=""
+
+  # Assign content using the emoji or the event type
+  EVENT_EMOJI="${EVENT_EMOJIS[$EVENT_TYPE]}"
+  if [ "$EVENT_EMOJI" != "" ]; then
+    CONTENT="$EVENT_EMOJI"
+  else
+    CONTENT="$EVENT_TYPE"
+  fi
+
+  # Assign content based on event type
+  if [ "$BURN_BLOCK_HEIGHT" != "" ]; then
+    CONTENT="$CONTENT $BURN_BLOCK_HEIGHT"
+  fi
+
+  if [ "$STACKS_BLOCK_HEIGHT" != "" ]; then
+    CONTENT="$CONTENT $STACKS_BLOCK_HEIGHT"
+  fi
+
   # Build a JSON object for the event
-  EVENT_JSON=$(jq -n --arg node "$POD_NAME" --arg time "$TIMESTAMP_DISPLAY" --arg time_sortable "$TIMESTAMP_SORTABLE" --arg type "$EVENT_TYPE" --arg msg "$MESSAGE" '{node: $node, timestamp: $time, timestamp_sortable: ($time_sortable | tonumber), event_type: $type, message: $msg}')
+  EVENT_JSON=$(jq -n \
+    --arg node "$POD_NAME" \
+    --arg time "$TIMESTAMP_DISPLAY" \
+    --arg time_sortable "$TIMESTAMP_SORTABLE" \
+    --arg type "$EVENT_TYPE" \
+    --arg msg "$MESSAGE" \
+    --arg burn_height "$BURN_BLOCK_HEIGHT" \
+    --arg stacks_height "$STACKS_BLOCK_HEIGHT" \
+    '{
+      node: $node,
+      timestamp: $time,
+      timestamp_sortable: ($time_sortable | tonumber),
+      event_type: $type,
+      message: $msg,
+      burn_block_height: ($burn_height | tonumber? // null),
+      stacks_block_height: ($stacks_height | tonumber? // null)
+    }')
+
+  # Build the event object for Vis.js
+  EVENT_OBJ=$(jq -n \
+    --arg id "$EVENT_ID" \
+    --arg content "$CONTENT" \
+    --arg start "$TIMESTAMP_DISPLAY" \
+    --arg group "$POD_NAME" \
+    --arg className "event-$EVENT_TYPE" \
+    --arg title "$MESSAGE" \
+    --arg burn_height "$BURN_BLOCK_HEIGHT" \
+    --arg stacks_height "$STACKS_BLOCK_HEIGHT" \
+    '{
+      id: ($id | tonumber),
+      content: $content,
+      start: $start,
+      group: $group,
+      className: $className,
+      title: $title,
+      burn_block_height: ($burn_height | tonumber? // null),
+      stacks_block_height: ($stacks_height | tonumber? // null)
+    }')
+
+  # Append the event to the VIS_EVENTS array
+  VIS_EVENTS+=("$EVENT_OBJ")
+
+  # Increment the event ID counter
+  EVENT_ID=$((EVENT_ID + 1))
   
   # Append the event to the NODE_EVENTS array
   NODE_EVENTS["$POD_NAME"]+="$EVENT_JSON"$'\n'
+  # Append the event to the ALL_EVENTS array
+  ALL_EVENTS+=("$EVENT_JSON")
 done < "$TEMP_DATA"
+
+# Convert the VIS_EVENTS array to a JSON array and save to events.json
+printf '%s\n' "${VIS_EVENTS[@]}" | jq -s '.' > "$OUTPUT_DIR/events.json"
+
+# Extract unique node names
+POD_NAMES=$(printf '%s\n' "${VIS_EVENTS[@]}" | jq -r '.group' | sort | uniq)
+
+# Initialize an array to store group data
+VIS_GROUPS=()
+
+# Build group objects for Vis.js
+while IFS= read -r pod_name
+do
+  GROUP_OBJ=$(jq -n \
+    --arg id "$pod_name" \
+    --arg content "$pod_name" \
+    '{id: $id, content: $content}')
+  VIS_GROUPS+=("$GROUP_OBJ")
+done <<< "$POD_NAMES"
+
+# Convert the VIS_GROUPS array to a JSON array and save to groups.json
+printf '%s\n' "${VIS_GROUPS[@]}" | jq -s '.' > "$OUTPUT_DIR/groups.json"
 
 # Generate a section for each node
 for NODE in "${!NODE_EVENTS[@]}"; do
-  echo "<h2>Node: $NODE</h2>" >> "$OUTPUT_HTML"
-  echo "<table>" >> "$OUTPUT_HTML"
-  echo "<tr><th>Timestamp</th><th>Event Type</th><th>Message</th></tr>" >> "$OUTPUT_HTML"
+  echo "<h2>Node: $NODE</h2>" >> "$NODE_HTML"
+  echo "<table>" >> "$NODE_HTML"
+  echo "<tr><th>Timestamp</th><th>Event Type</th><th>Message</th></tr>" >> "$NODE_HTML"
   
   # Read events for the node and sort them by timestamp
   echo "${NODE_EVENTS[$NODE]}" | jq -s '. | sort_by(.timestamp_sortable)' | jq -c '.[]' | while IFS= read -r event_line
@@ -103,19 +228,82 @@ for NODE in "${!NODE_EVENTS[@]}"; do
     MESSAGE=$(echo "$event_line" | jq -r '.message')
     EVENT_CLASS="event-$EVENT_TYPE"
     
-    echo "<tr class=\"$EVENT_CLASS\">" >> "$OUTPUT_HTML"
-    echo "<td>$TIMESTAMP</td>" >> "$OUTPUT_HTML"
-    echo "<td>$EVENT_TYPE</td>" >> "$OUTPUT_HTML"
-    echo "<td>$MESSAGE</td>" >> "$OUTPUT_HTML"
-    echo "</tr>" >> "$OUTPUT_HTML"
+    echo "<tr class=\"$EVENT_CLASS\">" >> "$NODE_HTML"
+    echo "<td>$TIMESTAMP</td>" >> "$NODE_HTML"
+    echo "<td>$EVENT_TYPE</td>" >> "$NODE_HTML"
+    echo "<td>$MESSAGE</td>" >> "$NODE_HTML"
+    if [ "$BURN_BLOCK_HEIGHT" != "" ] && [ "$BURN_BLOCK_HEIGHT" != "null" ]; then
+      echo "<td>Burn Block Height: $BURN_BLOCK_HEIGHT</td>" >> "$NODE_HTML"
+    else
+      echo "<td></td>" >> "$NODE_HTML"
+    fi
+    echo "</tr>" >> "$NODE_HTML"
   done
   
-  echo "</table>" >> "$OUTPUT_HTML"
+  echo "</table>" >> "$NODE_HTML"
 done
 
-echo "</body></html>" >> "$OUTPUT_HTML"
+echo "</body></html>" >> "$NODE_HTML"
+
+# Convert the ALL_EVENTS array to a JSON array and sort it
+SORTED_EVENTS=$(printf '%s\n' "${ALL_EVENTS[@]}" | jq -s 'sort_by(.timestamp_sortable)')
+
+# Start generating HTML
+echo "<html><head><title>Network Event Report</title>" > "$COMBINED_HTML"
+echo '<script src="https://unpkg.com/vis-timeline@7.4.9/standalone/umd/vis-timeline-graph2d.min.js"></script>' >> "$COMBINED_HTML"
+echo "<style>
+body { font-family: Arial, sans-serif; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+th { background-color: #f2f2f2; }
+.event-processes_burn_block { background-color: #e6f7ff; }
+.event-advances_stacks_tip { background-color: #fffbe6; }
+.event-proposes_new_block { background-color: #f9f0ff; }
+.event-receives_signature { background-color: #f6ffed; }
+.event-broadcasts_signed_block { background-color: #fff0f6; }
+.event-gives_up_waiting { background-color: #fff1f0; }
+.event-submits_block_commit { background-color: #f0f5ff; }
+</style>" >> "$COMBINED_HTML"
+echo "</head><body>" >> "$COMBINED_HTML"
+echo "<h1>Timeline</h1>" >> "$COMBINED_HTML"
+echo "<div id=\"timeline\"></div>" >> "$COMBINED_HTML"
+echo "<h1>Network Event Report</h1>" >> "$COMBINED_HTML"
+
+# Create the table header
+echo "<table>" >> "$COMBINED_HTML"
+echo "<tr><th>Timestamp</th><th>Node</th><th>Event Type</th><th>Message</th><th>Details</th></tr>" >> "$COMBINED_HTML"
+
+# Iterate over the sorted events and generate table rows
+echo "$SORTED_EVENTS" | jq -c '.[]' | while IFS= read -r event_line
+do
+  TIMESTAMP=$(echo "$event_line" | jq -r '.timestamp')
+  POD_NAME=$(echo "$event_line" | jq -r '.node')
+  EVENT_TYPE=$(echo "$event_line" | jq -r '.event_type')
+  MESSAGE=$(echo "$event_line" | jq -r '.message')
+  BURN_BLOCK_HEIGHT=$(echo "$event_line" | jq -r '.burn_block_height // ""')
+  EVENT_CLASS="event-$EVENT_TYPE"
+
+  echo "<tr class=\"$EVENT_CLASS\">" >> "$COMBINED_HTML"
+  echo "<td>$TIMESTAMP</td>" >> "$COMBINED_HTML"
+  echo "<td>$POD_NAME</td>" >> "$COMBINED_HTML"
+  echo "<td>$EVENT_TYPE</td>" >> "$COMBINED_HTML"
+  echo "<td>$MESSAGE</td>" >> "$COMBINED_HTML"
+
+  # Include Burn Block Height or other details
+  if [ "$BURN_BLOCK_HEIGHT" != "" ] && [ "$BURN_BLOCK_HEIGHT" != "null" ]; then
+    echo "<td>Burn Block Height: $BURN_BLOCK_HEIGHT</td>" >> "$COMBINED_HTML"
+  else
+    echo "<td></td>" >> "$COMBINED_HTML"
+  fi
+
+  echo "</tr>" >> "$COMBINED_HTML"
+done
+
+# Close the table and HTML tags
+echo "</table>" >> "$COMBINED_HTML"
+echo "</body></html>" >> "$COMBINED_HTML"
 
 # Clean up
 rm "$TEMP_DATA"
 
-echo "HTML report generated: $OUTPUT_HTML"
+echo "HTML reports generated: $NODE_HTML, $COMBINED_HTML"
