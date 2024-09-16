@@ -1,0 +1,121 @@
+#!/opt/homebrew/bin/bash
+
+# Check if logfile is provided
+if [ -z "$1" ]; then
+  echo "Usage: $0 logfile.json"
+  exit 1
+fi
+
+LOGFILE="$1"
+OUTPUT_HTML="output/network_report.html"
+
+# Temporary file to store parsed data
+TEMP_DATA="parsed_events.jsonl"
+
+# Define the event patterns and corresponding event types
+declare -A EVENT_PATTERNS=(
+  ["processes_burn_block"]="SORTITION\\\\("
+  ["advances_stacks_tip"]="Advanced to new tip!"
+  ["proposes_new_block"]="Miner: Assembled block"
+  ["receives_signature"]="SignCoordinator: Signature Added to block"
+  ["receives_rejection"]="rejected our block"
+  ["broadcasts_signed_block"]="Miner: Block signed by signer set and broadcasted"
+  ["gives_up_waiting"]="SignCoordinator: Cancel signature aggregation; burnchain tip has changed"
+  ["submits_block_commit"]="Relayer: Submitted block-commit"
+)
+
+# Build jq filter dynamically
+JQ_FILTER='select('
+for EVENT_TYPE in "${!EVENT_PATTERNS[@]}"; do
+  PATTERN="${EVENT_PATTERNS[$EVENT_TYPE]}"
+  JQ_FILTER+="(.fields.message | test(\"$PATTERN\")) or "
+done
+# Remove the trailing ' or ' and close the select statement
+JQ_FILTER=${JQ_FILTER% or }')'
+
+# Extract events and add an event_type field
+jq -c ".[] | $JQ_FILTER | . as \$base | 
+  .fields |= (. + { 
+    event_type: (
+      if .message | test(\"${EVENT_PATTERNS[processes_burn_block]}\") then \"processes_burn_block\" 
+      elif .message | test(\"${EVENT_PATTERNS[advances_stacks_tip]}\") then \"advances_stacks_tip\"
+      elif .message | test(\"${EVENT_PATTERNS[proposes_new_block]}\") then \"proposes_new_block\"
+      elif .message | test(\"${EVENT_PATTERNS[receives_signature]}\") then \"receives_signature\"
+      elif .message | test(\"${EVENT_PATTERNS[broadcasts_signed_block]}\") then \"broadcasts_signed_block\"
+      elif .message | test(\"${EVENT_PATTERNS[gives_up_waiting]}\") then \"gives_up_waiting\"
+      elif .message | test(\"${EVENT_PATTERNS[submits_block_commit]}\") then \"submits_block_commit\"
+      else \"unknown\" end
+    )
+  })" "$LOGFILE" > "$TEMP_DATA"
+
+# Generate HTML Report
+echo "<html><head><title>Network Report</title>" > "$OUTPUT_HTML"
+echo "<style>
+body { font-family: Arial, sans-serif; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid #ddd; padding: 8px; }
+th { background-color: #f2f2f2; }
+.event-processes_burn_block { background-color: #e6f7ff; }
+.event-advances_stacks_tip { background-color: #fffbe6; }
+.event-proposes_new_block { background-color: #f9f0ff; }
+.event-receives_signature { background-color: #f6ffed; }
+.event-broadcasts_signed_block { background-color: #fff0f6; }
+.event-gives_up_waiting { background-color: #fff1f0; }
+.event-submits_block_commit { background-color: #f0f5ff; }
+</style>" >> "$OUTPUT_HTML"
+echo "</head><body>" >> "$OUTPUT_HTML"
+echo "<h1>Network Report</h1>" >> "$OUTPUT_HTML"
+
+# Organize events per node
+# Create an associative array to store events per node
+declare -A NODE_EVENTS
+
+while IFS= read -r line
+do
+  POD_NAME=$(echo "$line" | jq -r '.fields.pod_name')
+  TIMESTAMP=$(echo "$line" | jq -r '.timestamp')
+  EVENT_TYPE=$(echo "$line" | jq -r '.fields.event_type')
+  MESSAGE=$(echo "$line" | jq -r '.fields.message')
+  
+  # Convert timestamp to a sortable format (e.g., epoch seconds)
+  TIMESTAMP_SORTABLE=$(echo "$TIMESTAMP" | tr -cd '[:digit:]')
+  TIMESTAMP_SECONDS=$(awk "BEGIN {printf \"%.3f\", $TIMESTAMP / 1000000000}")
+  TIMESTAMP_DISPLAY=$(date -u -r "${TIMESTAMP_SECONDS%.*}" +"%Y-%m-%dT%H:%M:%SZ")
+  
+  # Build a JSON object for the event
+  EVENT_JSON=$(jq -n --arg node "$POD_NAME" --arg time "$TIMESTAMP_DISPLAY" --arg time_sortable "$TIMESTAMP_SORTABLE" --arg type "$EVENT_TYPE" --arg msg "$MESSAGE" '{node: $node, timestamp: $time, timestamp_sortable: ($time_sortable | tonumber), event_type: $type, message: $msg}')
+  
+  # Append the event to the NODE_EVENTS array
+  NODE_EVENTS["$POD_NAME"]+="$EVENT_JSON"$'\n'
+done < "$TEMP_DATA"
+
+# Generate a section for each node
+for NODE in "${!NODE_EVENTS[@]}"; do
+  echo "<h2>Node: $NODE</h2>" >> "$OUTPUT_HTML"
+  echo "<table>" >> "$OUTPUT_HTML"
+  echo "<tr><th>Timestamp</th><th>Event Type</th><th>Message</th></tr>" >> "$OUTPUT_HTML"
+  
+  # Read events for the node and sort them by timestamp
+  echo "${NODE_EVENTS[$NODE]}" | jq -s '. | sort_by(.timestamp_sortable)' | jq -c '.[]' | while IFS= read -r event_line
+  do
+    TIMESTAMP=$(echo "$event_line" | jq -r '.timestamp')
+    EVENT_TYPE=$(echo "$event_line" | jq -r '.event_type')
+    MESSAGE=$(echo "$event_line" | jq -r '.message')
+    EVENT_CLASS="event-$EVENT_TYPE"
+    
+    echo "<tr class=\"$EVENT_CLASS\">" >> "$OUTPUT_HTML"
+    echo "<td>$TIMESTAMP</td>" >> "$OUTPUT_HTML"
+    echo "<td>$EVENT_TYPE</td>" >> "$OUTPUT_HTML"
+    echo "<td>$MESSAGE</td>" >> "$OUTPUT_HTML"
+    echo "</tr>" >> "$OUTPUT_HTML"
+  done
+  
+  echo "</table>" >> "$OUTPUT_HTML"
+done
+
+echo "</body></html>" >> "$OUTPUT_HTML"
+
+# Clean up
+rm "$TEMP_DATA"
+
+echo "HTML report generated: $OUTPUT_HTML"
