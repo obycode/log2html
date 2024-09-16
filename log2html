@@ -16,7 +16,7 @@ TEMP_DATA="parsed_events.jsonl"
 
 # Define the event patterns and corresponding event types
 declare -A EVENT_PATTERNS=(
-  ["processes_burn_block"]="SORTITION\\\\("
+  ["processes_burn_block"]="CONSENSUS\\\\("
   ["advances_stacks_tip"]="Advanced to new tip!"
   ["proposes_new_block"]="Miner: Assembled block"
   ["receives_signature"]="SignCoordinator: Signature Added to block"
@@ -62,7 +62,20 @@ jq -c '.[] | '"$JQ_FILTER"' | . as $base |
     ),
     burn_block_height: (
       if .message | test("'"${EVENT_PATTERNS[processes_burn_block]}"'") then
-        (.message | match("SORTITION\\((\\d+)\\)"; "g") | .captures[0].string)
+        (.message | match("CONSENSUS\\((\\d+)\\)"; "g") | .captures[0].string)
+      else null end
+    ),
+    consensus_hash: (
+      if .message | test("'"${EVENT_PATTERNS[processes_burn_block]}"'") then
+        (.message | match("CONSENSUS\\(\\d+\\): (\\w+)"; "g") | .captures[0].string)
+      elif .message | test("'"${EVENT_PATTERNS[proposes_new_block]}"'") then
+        (.consensus_hash | tostring)
+      elif .message | test("'"${EVENT_PATTERNS[advances_stacks_tip]}"'") then
+        (.message | match("Advanced to new tip! (\\w+)/"; "g") | .captures[0].string)
+      elif .message | test("'"${EVENT_PATTERNS[submits_block_commit]}"'") then
+        (.tip_consensus_hash | tostring)
+      elif .message | test("'"${EVENT_PATTERNS[broadcasts_signed_block]}"'") then
+        (.consensus_hash | tostring)
       else null end
     ),
     stacks_block_height: (
@@ -73,8 +86,27 @@ jq -c '.[] | '"$JQ_FILTER"' | . as $base |
       elif .message | test("'"${EVENT_PATTERNS[submits_block_commit]}"'") then
         (.tip_height | tostring)
       else null end
+    ),
+    stacks_block_sighash: (
+      if .message | test("'"${EVENT_PATTERNS[proposes_new_block]}"'") then
+        (.signer_sighash | tostring)
+      elif .message | test("'"${EVENT_PATTERNS[advances_stacks_tip]}"'") then
+        (.message | match("Advanced to new tip! (\\w+)/(\\w+)"; "g") | .captures[1].string)
+      elif .message | test("'"${EVENT_PATTERNS[proposes_new_block]}"'") then
+        (.signer_sighash | tostring)
+      elif .message | test("'"${EVENT_PATTERNS[receives_signature]}"'") then
+        (.stacks_block_hash | tostring)
+      elif .message | test("'"${EVENT_PATTERNS[broadcasts_signed_block]}"'") then
+        (.signer_sighash | tostring)
+      else null end
     )
   })' "$LOGFILE" > "$TEMP_DATA"
+
+  # Sort TEMP_DATA by timestamp
+jq -s 'sort_by(.timestamp|tonumber)' "$TEMP_DATA" | jq -c '.[]' > "${TEMP_DATA}.sorted"
+
+# Replace TEMP_DATA with the sorted data
+mv "${TEMP_DATA}.sorted" "$TEMP_DATA"
 
 # Generate HTML Report
 echo "<html><head><title>Network Report</title>" > "$NODE_HTML"
@@ -106,6 +138,12 @@ VIS_EVENTS=()
 # Event ID counter
 EVENT_ID=1
 
+# Map of consensus hashes to burn block heights
+declare -A CONSENSUS_BURN_MAP
+
+# Map of signer_sighash to stacks block height
+declare -A STACKS_BLOCK_HEIGHT_MAP
+
 while IFS= read -r line
 do
   POD_NAME=$(echo "$line" | jq -r '.fields.pod_name')
@@ -114,7 +152,50 @@ do
   MESSAGE=$(echo "$line" | jq -r '.fields.message')
   BURN_BLOCK_HEIGHT=$(echo "$line" | jq -r '.fields.burn_block_height // empty')
   STACKS_BLOCK_HEIGHT=$(echo "$line" | jq -r '.fields.stacks_block_height // empty')
+  CONSENSUS_HASH=$(echo "$line" | jq -r '.fields.consensus_hash // empty')
+  STACKS_BLOCK_SIGHASH=$(echo "$line" | jq -r '.fields.stacks_block_sighash // empty')
   
+  # If this is a processes_burn_block event, update the map
+  if [ "$EVENT_TYPE" = "processes_burn_block" ]; then
+    if [ -n "$CONSENSUS_HASH" ] && [ -n "$BURN_BLOCK_HEIGHT" ]; then
+      # Store in the map
+      CONSENSUS_BURN_MAP["$CONSENSUS_HASH"]="$BURN_BLOCK_HEIGHT"
+    fi
+  else
+    # For events that are not processes_burn_block
+    # Extract consensus_hash if present
+    CONSENSUS_HASH=$(echo "$line" | jq -r '.fields.consensus_hash // ""')
+
+    # Initialize burn block height
+    BURN_BLOCK_HEIGHT=""
+
+    # If consensus_hash is present and in the map, get the burn block height
+    if [ -n "$CONSENSUS_HASH" ]; then
+      BURN_BLOCK_HEIGHT="${CONSENSUS_BURN_MAP[$CONSENSUS_HASH]}"
+    fi
+  fi
+
+  # If this is a block proposal, update the map
+  if [ "$EVENT_TYPE" = "proposes_new_block" ]; then
+    if [ -n "$STACKS_BLOCK_SIGHASH" ] && [ -n "$STACKS_BLOCK_HEIGHT" ]; then
+      # Store in the map
+      STACKS_BLOCK_HEIGHT_MAP["$STACKS_BLOCK_SIGHASH"]="$STACKS_BLOCK_HEIGHT"
+    fi
+  # if STACKS_BLOCK_HEIGHT is empty, then check if we can fill it in from the map
+  elif [ -z "$STACKS_BLOCK_HEIGHT" ]; then
+    # For events that are not proposes_new_block
+    # Extract stacks_block_sighash if present
+    STACKS_BLOCK_SIGHASH=$(echo "$line" | jq -r '.fields.stacks_block_sighash // ""')
+
+    # Initialize stacks block height
+    STACKS_BLOCK_HEIGHT=""
+
+    # If stacks_block_sighash is present and in the map, get the stacks block height
+    if [ -n "$STACKS_BLOCK_SIGHASH" ]; then
+      STACKS_BLOCK_HEIGHT="${STACKS_BLOCK_HEIGHT_MAP[$STACKS_BLOCK_SIGHASH]}"
+    fi
+  fi
+
   # Convert timestamp to a sortable format (e.g., epoch seconds)
   TIMESTAMP_SORTABLE=$(echo "$TIMESTAMP" | tr -cd '[:digit:]')
   TIMESTAMP_SECONDS=$(awk "BEGIN {printf \"%.3f\", $TIMESTAMP / 1000000000}")
@@ -137,7 +218,7 @@ do
   fi
 
   if [ "$STACKS_BLOCK_HEIGHT" != "" ]; then
-    CONTENT="$CONTENT $STACKS_BLOCK_HEIGHT"
+    CONTENT="$CONTENT / $STACKS_BLOCK_HEIGHT"
   fi
 
   # Build a JSON object for the event

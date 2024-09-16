@@ -2,6 +2,7 @@
 <html>
   <head>
     <title>Network Event Timeline</title>
+    <meta charset="UTF-8">
     <script
       type="text/javascript"
       src="https://unpkg.com/vis-timeline@latest/standalone/umd/vis-timeline-graph2d.min.js"
@@ -34,6 +35,9 @@
       .event-submits_block_commit {
         background-color: #f0f5ff;
       }
+      .event-receives_rejection {
+        background-color: #fff2e8;
+      }
       #visualization {
         width: 100%;
         height: 600px;
@@ -63,25 +67,34 @@
       <h3>Event Types:</h3>
       <ul>
         <li>
-          <span class="event-processes_burn_block">Processes Burn Block</span>
+          <span class="event-processes_burn_block"
+            >🔥 Processes Burn Block</span
+          >
         </li>
         <li>
-          <span class="event-advances_stacks_tip">Advances Stacks Tip</span>
+          <span class="event-advances_stacks_tip">⬆️ Advances Stacks Tip</span>
         </li>
         <li>
-          <span class="event-proposes_new_block">Proposes New Block</span>
+          <span class="event-proposes_new_block">📦 Proposes New Block</span>
         </li>
         <li>
-          <span class="event-receives_signature">Receives Signature</span>
+          <span class="event-receives_signature">✍️ Receives Signature</span>
         </li>
         <li>
           <span class="event-broadcasts_signed_block"
-            >Broadcasts Signed Block</span
+            >📡 Broadcasts Signed Block</span
           >
         </li>
-        <li><span class="event-gives_up_waiting">Gives Up Waiting</span></li>
         <li>
-          <span class="event-submits_block_commit">Submits Block Commit</span>
+          <span class="event-gives_up_waiting">⌛️ Gives Up Waiting</span>
+        </li>
+        <li>
+          <span class="event-submits_block_commit"
+            >🔒 Submits Block Commit</span
+          >
+        </li>
+        <li>
+          <span class="event-receives_rejection">❌ Receives rejection</span>
         </li>
       </ul>
     </div>
