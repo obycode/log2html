@@ -306,4 +306,8 @@ echo "</body></html>" >> "$COMBINED_HTML"
 # Clean up
 rm "$TEMP_DATA"
 
-echo "HTML reports generated: $NODE_HTML, $COMBINED_HTML"
+echo "Timeline: http://localhost:8000/timeline.html"
+echo "Combined report: http://localhost:8000/output/combined_report.html"
+echo "Node report: http://localhost:8000/output/node_report.html"
+
+python3 -m http.server 8000
